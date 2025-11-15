@@ -72,6 +72,58 @@ export default async function handler(
   try {
     const openai = new OpenAI({ apiKey: openaiApiKey });
 
+    // Calculate confidence score based on data quality and availability
+    const calculateConfidence = (amazon: any, youtube: any, reddit: any): number => {
+      let score = 0;
+      let factors = 0;
+      
+      // Amazon data quality (40% weight)
+      if (amazon.reviewCount > 0) {
+        const reviewScore = Math.min(amazon.reviewCount / 100, 1) * 40; // Max 40 points
+        score += reviewScore;
+        factors++;
+      }
+      if (amazon.rating > 0) {
+        const ratingScore = (amazon.rating / 5) * 10; // Max 10 points
+        score += ratingScore;
+        factors++;
+      }
+      if (amazon.specs && amazon.specs.general && amazon.specs.general.length > 0) {
+        const specsScore = Math.min(amazon.specs.general.length / 10, 1) * 5; // Max 5 points
+        score += specsScore;
+        factors++;
+      }
+      
+      // YouTube data quality (25% weight)
+      if (youtube.videos && youtube.videos.length > 0) {
+        const videoScore = Math.min(youtube.videos.length / 3, 1) * 25; // Max 25 points
+        score += videoScore;
+        factors++;
+      }
+      
+      // Reddit data quality (20% weight)
+      if (reddit.threads && reddit.threads.length > 0) {
+        const threadScore = Math.min(reddit.threads.length / 5, 1) * 15; // Max 15 points
+        score += threadScore;
+        factors++;
+      }
+      if (reddit.sentiment && (reddit.sentiment.positive + reddit.sentiment.neutral + reddit.sentiment.negative) > 0) {
+        const sentimentScore = 5; // Max 5 points if sentiment data exists
+        score += sentimentScore;
+        factors++;
+      }
+      
+      // Consensus bonus (5% weight) - if multiple sources agree
+      if (factors >= 3) {
+        score += 5; // Bonus for having data from multiple sources
+      }
+      
+      // Ensure score is between 0-100
+      return Math.round(Math.min(Math.max(score, 0), 100));
+    };
+
+    const calculatedConfidence = calculateConfidence(amazonData, youtubeData, redditData);
+
     // Build the fusion prompt
     const fusionPrompt = `You are VerdictAI, an AI that merges multiple sources of product truth.
 
@@ -85,7 +137,7 @@ Your job:
 2. Identify warnings (common complaints/issues)
 3. Determine best alternatives (from Amazon data or infer reasonable competitors)
 4. Create a final verdict: STRONG BUY, BUY, CAUTION, or AVOID
-5. Calculate confidence score (0-100) based on data quality and consensus
+5. Use the pre-calculated confidence score: ${calculatedConfidence} (based on data quality and availability)
 6. Build pros/cons with frequency counts
 7. Organize specs into general and category-specific (e.g., audio, display, etc.)
 
@@ -96,7 +148,7 @@ Return ONLY valid JSON matching this exact schema:
   "price": "string with $",
   "originalPrice": "string with $ or empty string",
   "discount": "string like '22% off' or empty string",
-  "confidence": number (0-100),
+  "confidence": ${calculatedConfidence},
   "verdict": {
     "recommendation": "STRONG BUY" | "BUY" | "CAUTION" | "AVOID",
     "summary": "2-3 sentence summary",
@@ -182,9 +234,8 @@ CRITICAL: Return ONLY the JSON object, no markdown, no code blocks, no explanati
     if (!verdictObject.discount) {
       verdictObject.discount = amazonData.discount || '';
     }
-    if (typeof verdictObject.confidence !== 'number') {
-      verdictObject.confidence = 85;
-    }
+    // Use the calculated confidence score
+    verdictObject.confidence = calculatedConfidence;
 
     // Merge in the actual source data
     verdictObject.insights.youtube = youtubeData;
@@ -217,6 +268,16 @@ CRITICAL: Return ONLY the JSON object, no markdown, no code blocks, no explanati
   } catch (error: any) {
     console.error('Error fusing data:', error);
     
+    // Calculate confidence for fallback
+    const fallbackConfidence = (() => {
+      let score = 0;
+      if (amazonData.reviewCount > 0) score += Math.min(amazonData.reviewCount / 100, 1) * 40;
+      if (amazonData.rating > 0) score += (amazonData.rating / 5) * 10;
+      if (youtubeData.videos && youtubeData.videos.length > 0) score += Math.min(youtubeData.videos.length / 3, 1) * 25;
+      if (redditData.threads && redditData.threads.length > 0) score += Math.min(redditData.threads.length / 5, 1) * 15;
+      return Math.round(Math.min(Math.max(score, 0), 100));
+    })();
+    
     // Return a fallback verdict object
     const fallbackVerdict: VerdictObject = {
       productName: amazonData.title || 'Product',
@@ -224,7 +285,7 @@ CRITICAL: Return ONLY the JSON object, no markdown, no code blocks, no explanati
       price: amazonData.price || '$0.00',
       originalPrice: amazonData.originalPrice || '',
       discount: amazonData.discount || '',
-      confidence: 75,
+      confidence: fallbackConfidence,
       verdict: {
         recommendation: 'BUY',
         summary: 'Product analysis based on available reviews and discussions.',
